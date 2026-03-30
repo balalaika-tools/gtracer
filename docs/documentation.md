@@ -261,17 +261,9 @@ logging.getLogger("gtracer").setLevel(25)
 logging.getLogger("gtracer").setLevel(logging.getLevelName("TRACE"))
 ```
 
-**JSON output:** The tracer emits via `logger.trace(msg, extra=payload)`. Python's logging flattens `extra={}` fields onto the `LogRecord`. Use a JSON formatter (e.g. `python-json-logger`) to get structured output:
+**JSON output:** The tracer emits via `logger.trace(msg, extra=payload)`. Python's logging flattens `extra={}` fields onto the `LogRecord`. No third-party formatter required — if your app already has a JSON formatter on the root logger, spans are serialised by it automatically.
 
-```python
-from pythonjsonlogger import jsonlogger
-
-handler = logging.StreamHandler()
-handler.setFormatter(jsonlogger.JsonFormatter())
-logging.getLogger("gtracer").addHandler(handler)
-```
-
-**CloudWatch / stdout:** If your app already emits structured JSON logs to stdout (captured by CloudWatch), just ensure the `"gtracer"` logger propagates to the root handler, or add its own handler.
+**CloudWatch / stdout:** Ensure the `"gtracer"` logger propagates to the root handler (the default), or attach your own handler directly to `logging.getLogger("gtracer")`.
 
 **Emit pipeline:**
 

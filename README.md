@@ -1,8 +1,39 @@
+<div align="center">
+
 # gtracer
 
-Lightweight span-based tracing for LangChain and LangGraph agents.
+**Lightweight span-based tracing for LangChain and LangGraph agents.**
 
-Emits structured JSONL spans via Python's standard `logging` — no new infrastructure required. Works with CloudWatch, Datadog, stdout, or any log handler.
+Emits structured JSONL spans via Python's standard `logging` —
+no new infrastructure, no agents, no dashboards required.
+
+[![Python](https://img.shields.io/badge/Python-3.13+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![PyPI](https://img.shields.io/pypi/v/gtracer.svg?color=blue)](https://pypi.org/project/gtracer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![LangChain](https://img.shields.io/badge/LangChain-compatible-1C3C3C.svg?logo=chainlink&logoColor=white)](https://python.langchain.com)
+[![LangGraph](https://img.shields.io/badge/LangGraph-compatible-1C3C3C.svg?logo=chainlink&logoColor=white)](https://langchain-ai.github.io/langgraph/)
+
+</div>
+
+---
+
+## What it does
+
+Every time an LLM call happens inside your agent, gtracer captures it as a structured span and writes it to stdout as JSON:
+
+```
+run
+└── agent "main"
+    ├── llm_call seq:1  ← tokens, model, message delta, latency
+    │   └── tool_call search_database  ← input, result, duration
+    ├── llm_call seq:2
+    │   └── tool_call calculator
+    └── llm_call seq:3  ← final answer
+```
+
+Works with CloudWatch, Datadog, or any stdout log consumer. Zero configuration — spans are live the moment you import the package.
+
+---
 
 ## Install
 
@@ -12,28 +43,17 @@ pip install gtracer
 uv add gtracer
 ```
 
+---
+
 ## Quick Start
 
-### 1. Enable trace output
+### 1. Import and go
 
 ```python
-import logging
-logging.getLogger("gtracer").setLevel(25)  # TRACE level
+import gtracer  # spans are live immediately — nothing else needed
 ```
 
-Add a JSON formatter if you want structured output (recommended):
-
-```bash
-pip install python-json-logger
-```
-
-```python
-from pythonjsonlogger import jsonlogger
-
-handler = logging.StreamHandler()
-handler.setFormatter(jsonlogger.JsonFormatter())
-logging.getLogger("gtracer").addHandler(handler)
-```
+gtracer auto-configures at import time. It attaches its own JSON handler with `propagate=False` — it **never touches your app's root logger**, no double-emission, no interference.
 
 ### 2. Wrap your agent
 
@@ -53,7 +73,7 @@ async def run(session_id: str, user_input: str):
             return result
 ```
 
-That's it. Every LLM call is now automatically traced with tokens, model, latency, and message deltas.
+Every LLM call is now automatically captured — tokens, model, latency, message deltas.
 
 ### 3. Instrument your tools
 
@@ -73,26 +93,61 @@ async def search_database(query: str) -> str:
         return result
 ```
 
-## What You Get
+---
 
-Each trace run produces a tree of JSONL span events:
+## Silence in Production
 
+Set the env var — no code change needed:
+
+```bash
+GTRACER_ENABLED=false
 ```
-run  (tags: session_id=...)
-└── agent "main"
-    ├── llm_call seq:1  (tokens, model, delta messages)
-    │   └── tool_call search_database  (input, result, duration)
-    ├── llm_call seq:2
-    │   └── tool_call calculator
-    └── llm_call seq:3  (final answer)
+
+Tracing mechanics (spans, callbacks, token counts) stay fully active. Only stdout output is suppressed.
+
+---
+
+## Span Schema
+
+Every span event is a flat JSON object on a single line:
+
+```json
+{
+  "ts": "2026-03-30T10:00:00",
+  "level": "TRACE",
+  "event": "span.end",
+  "span_name": "llm_call",
+  "trace_id": "abc123",
+  "span_id": "a1b2c3d4",
+  "parent_span_id": "e5f6a7b8",
+  "status": "ok",
+  "duration_ms": 1823,
+  "attrs": {
+    "agent": "main",
+    "model": "claude-sonnet-4-6",
+    "seq": 2,
+    "tokens": {
+      "input": 461,
+      "output": 277,
+      "total": 738,
+      "input_cache_read": 15541
+    },
+    "stop_reason": "tool_use"
+  }
+}
 ```
 
 Each `llm_call` span captures:
-- **Tokens**: input, output, total, cache_read, cache_creation
-- **Model**: exact model ID from the provider response
-- **Delta**: new messages added since the previous LLM call
-- **Latency**: wall-clock duration in milliseconds
-- **Stop reason**: `tool_use`, `end_turn`, etc.
+
+| Field | Description |
+|---|---|
+| `attrs.tokens` | input, output, total, cache_read, cache_creation |
+| `attrs.model` | exact model ID from the provider response |
+| `attrs.delta` | new messages added since the previous LLM call |
+| `duration_ms` | wall-clock latency in milliseconds |
+| `attrs.stop_reason` | `tool_use`, `end_turn`, etc. |
+
+---
 
 ## Configuration
 
@@ -102,42 +157,23 @@ from gtracer import configure
 configure(truncation_limit=50_000)  # max chars for message content fields (default)
 ```
 
-## Log Schema
-
-Every span event is a flat JSON object:
-
-```json
-{
-  "level": "TRACE",
-  "event": "span.end",
-  "span_name": "llm_call",
-  "trace_id": "abc123",
-  "span_id": "a1b2c3d4",
-  "parent_span_id": "e5f6a7b8",
-  "session_id": "...",
-  "status": "ok",
-  "duration_ms": 1823,
-  "attrs": {
-    "agent": "main",
-    "model": "claude-sonnet-4-6",
-    "seq": 2,
-    "tokens": {"input": 461, "output": 277, "total": 738, "input_cache_read": 15541},
-    "stop_reason": "tool_use"
-  }
-}
-```
+---
 
 ## Supported Patterns
 
-- `create_agent` ReAct loop (tool use + structured output)
-- `StateGraph` with custom nodes
-- Nested sub-agents (agent-as-a-tool)
-- LangChain Deep Agents (`create_deep_agent`)
-- Parallel tool execution
+| Pattern | Description |
+|---|---|
+| `create_agent` | ReAct loop with tool use and structured output |
+| `StateGraph` | LangGraph graphs with custom nodes |
+| Nested agents | Agent-as-a-tool with causal span parenting |
+| Deep Agents | LangChain `create_deep_agent` with sub-agents |
+| Parallel tools | Concurrent tool calls under the same `llm_call` parent |
 
 See [docs/comprehensive.md](docs/comprehensive.md) for full integration patterns, API reference, and gotchas.
 
+---
+
 ## Requirements
 
-- Python 3.11+
-- `langchain-core >= 0.3`
+[![Python](https://img.shields.io/badge/Python-3.13+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![langchain-core](https://img.shields.io/badge/langchain--core-%3E%3D1.2.23-1C3C3C.svg?logo=chainlink&logoColor=white)](https://pypi.org/project/langchain-core/)

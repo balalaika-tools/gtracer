@@ -1,5 +1,8 @@
 """gtracer — lightweight span-based tracing for LangChain/LangGraph agents."""
 
+import os
+
+from gtracer.logger import _configure
 from gtracer.tracer import (
     VALID_CHILDREN,
     SpanContext,
@@ -14,6 +17,12 @@ from gtracer.tracer import (
     tracer,
 )
 from gtracer.callbacks import TracingCallbackHandler, tracing_handler
+
+# Auto-configure at import time.
+# Set GTRACER_ENABLED=false to silence all span output in production.
+# Tracing mechanics (spans, callbacks, token counts) remain active either way.
+_enabled = os.environ.get("GTRACER_ENABLED", "true").strip().lower() != "false"
+_configure(_enabled)
 
 __all__ = [
     # Core tracer
