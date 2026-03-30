@@ -3,17 +3,24 @@
 Configures the "gtracer" logger at import time with its own JSON stdout
 handler. No user setup required.
 
-To silence span output in production set the env var before starting the app:
+Environment variables:
 
     GTRACER_ENABLED=false
+        Silence all span output. Tracing mechanics stay active.
 
-Spans will still be created and timed — only stdout output is suppressed.
+    GTRACER_LOG_TO_FILE=true
+        Write spans to a file in addition to stdout.
+        Creates Logs/gtracer_<YYYYMMDD_HHMMSS>.jsonl in the working directory.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 # Standard LogRecord attribute names — excluded from the extra-fields pass
@@ -76,7 +83,19 @@ def _configure(enabled: bool) -> None:
     logger.setLevel(level)
     logger.propagate = False  # own handler — never touches root logger
 
-    handler = logging.StreamHandler()
-    handler.setLevel(level)
-    handler.setFormatter(_JSONFormatter())
-    logger.addHandler(handler)
+    formatter = _JSONFormatter()
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(level)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    log_to_file = os.environ.get("GTRACER_LOG_TO_FILE", "false").strip().lower() == "true"
+    if log_to_file:
+        log_dir = Path.cwd() / "Logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"gtracer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)

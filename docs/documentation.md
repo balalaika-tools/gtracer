@@ -1,4 +1,13 @@
-# gtracer — Comprehensive Documentation
+<pre>
+ ██████╗ ████████╗██████╗  █████╗  ██████╗███████╗██████╗
+██╔════╝ ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔══██╗
+██║  ███╗   ██║   ██████╔╝███████║██║     █████╗  ██████╔╝
+██║   ██║   ██║   ██╔══██╗██╔══██║██║     ██╔══╝  ██╔══██╗
+╚██████╔╝   ██║   ██║  ██║██║  ██║╚██████╗███████╗██║  ██║
+ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝
+</pre>
+
+# Comprehensive Documentation
 
 A lightweight, generic tracing framework for LLM-based agentic applications.
 Produces structured JSONL logs that any log consumer (CloudWatch, Datadog,

@@ -1,14 +1,18 @@
 [build-system]
-requires = ["uv_build>=0.6.6"]
+requires = ["uv_build>=0.10.10,<0.11.0"]
 build-backend = "uv_build"
 
 [project]
 name = "gtracer"
-version = "0.1.0"
+version = "0.1.4"
 description = "Lightweight span-based tracing for LangChain/LangGraph agents"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+authors = [
+  { name = "Georgios Agrafiotis", email = "arafiet1991@gmail.com" },
+]
 keywords = ["langchain", "langgraph", "tracing", "observability", "llm", "agents"]
 classifiers = [
     "Development Status :: 4 - Beta",

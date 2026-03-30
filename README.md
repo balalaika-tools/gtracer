@@ -1,6 +1,13 @@
 <div align="center">
 
-# gtracer
+<pre>
+ ██████╗ ████████╗██████╗  █████╗  ██████╗███████╗██████╗
+██╔════╝ ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔══██╗
+██║  ███╗   ██║   ██████╔╝███████║██║     █████╗  ██████╔╝
+██║   ██║   ██║   ██╔══██╗██╔══██║██║     ██╔══╝  ██╔══██╗
+╚██████╔╝   ██║   ██║  ██║██║  ██║╚██████╗███████╗██║  ██║
+ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝
+</pre>
 
 **Lightweight span-based tracing for LangChain and LangGraph agents.**
 
@@ -95,15 +102,37 @@ async def search_database(query: str) -> str:
 
 ---
 
-## Silence in Production
+## Environment Variables
 
-Set the env var — no code change needed:
+| Variable | Default | Description |
+|---|---|---|
+| `GTRACER_ENABLED` | `true` | Set to `false` to suppress all stdout output. Tracing mechanics stay fully active. |
+| `GTRACER_LOG_TO_FILE` | `false` | Set to `true` to write spans to a file on disk. |
+
+### Silence in Production
 
 ```bash
-GTRACER_ENABLED=false
+GTRACER_ENABLED=false python your_app.py
 ```
 
-Tracing mechanics (spans, callbacks, token counts) stay fully active. Only stdout output is suppressed.
+Spans are still created and timed — only output is suppressed.
+
+### Save Logs Locally
+
+> ⚠️ **Local scripts only.** `GTRACER_LOG_TO_FILE` is intended for running Python scripts directly on your machine. Do not use it in Docker, ECS, Lambda, or any containerised/cloud environment — those environments have no persistent local filesystem and stdout is already captured by their log infrastructure.
+
+```bash
+GTRACER_LOG_TO_FILE=true python your_app.py
+```
+
+Creates `Logs/gtracer_<YYYYMMDD_HHMMSS>.jsonl` in the directory where the script is run. The `Logs/` folder is created automatically if it doesn't exist. Spans are written to both the file and stdout.
+
+Both variables can be combined:
+
+```bash
+GTRACER_ENABLED=false GTRACER_LOG_TO_FILE=true python your_app.py
+# silences console output, still writes to file
+```
 
 ---
 
@@ -169,7 +198,7 @@ configure(truncation_limit=50_000)  # max chars for message content fields (defa
 | Deep Agents | LangChain `create_deep_agent` with sub-agents |
 | Parallel tools | Concurrent tool calls under the same `llm_call` parent |
 
-See [docs/comprehensive.md](docs/comprehensive.md) for full integration patterns, API reference, and gotchas.
+See [docs/documentation.md](https://github.com/balalaika-tools/gtracer/blob/main/docs/documentation.md) for full integration patterns, API reference, and gotchas.
 
 ---
 
