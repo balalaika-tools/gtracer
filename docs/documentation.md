@@ -64,7 +64,7 @@ waterfalls, and cost analytics.
                             +-------------------v--------------------+
                             |        tracer.span("agent")            |
                             |    attrs: {agent: "main"}              |
-                            |    sets _agent_name ContextVar         |
+                            |    sets agent_name ContextVar          |
                             +---+---------------------------+--------+
                                 |                           |
                    LangGraph Task 1              LangGraph Task 2
@@ -93,7 +93,7 @@ waterfalls, and cost analytics.
 
 **Key design decisions:**
 
-1. **JSONL via Python logging** — no new infrastructure. Spans are emitted via `logger.trace()` at a custom TRACE level (25). Any `logging.Handler` captures them automatically.
+1. **JSONL via Python logging** — no new infrastructure. Spans are emitted via `logger.trace()` at a custom TRACE level (5, below DEBUG). Any `logging.Handler` captures them automatically.
 
 2. **Two APIs** — `span()` (context manager, updates ContextVars) for code you control, and `open_span()`/`close_span()` for LangChain callbacks where start/end happen in separate methods.
 
@@ -117,18 +117,18 @@ Five ContextVars provide async-safe span context propagation:
 
 | ContextVar | Type | Purpose |
 |---|---|---|
-| `_span_id` | `str \| None` | Current active span ID. Used by `_make_span()` to resolve `parent_span_id`. |
-| `_span_name` | `str \| None` | Current active span name. Used for hierarchy validation. |
-| `_trace_id` | `str \| None` | Session identifier. Set once by `start_trace()`, inherited by all descendant spans. |
-| `_tags` | `dict` | Inherited tags. Merged down the tree — child spans automatically carry all ancestor tags. |
-| `_agent_name` | `str` | Current agent name. Set when opening an `agent` span. Read by the callback handler to label `llm_call` spans. |
+| `span_id` | `str \| None` | Current active span ID. Used by `_make_span()` to resolve `parent_span_id`. |
+| `span_name` | `str \| None` | Current active span name. Used for hierarchy validation. |
+| `trace_id` | `str \| None` | Session identifier. Set once by `start_trace()`, inherited by all descendant spans. |
+| `tags` | `dict` | Inherited tags. Merged down the tree — child spans automatically carry all ancestor tags. |
+| `agent_name` | `str` | Current agent name. Set when opening an `agent` span. Read by the callback handler to label `llm_call` spans. |
 
 **Propagation rules:**
 
 - ContextVars are per-task in async code and per-thread in threaded code.
 - When LangGraph creates a new `asyncio.Task` (for an LLM node or Tool node), it uses `copy_context()` — the child task gets a **snapshot** of the parent's ContextVar state at task creation time.
 - Mutations inside the child task are invisible to the parent and to sibling tasks.
-- `_span_id` is set by `tracer.span("agent")` **before** LangGraph creates any tasks. So both the LLM node task and Tool node task inherit the same `_span_id` value (the agent's span_id).
+- `span_id` is set by `tracer.span("agent")` **before** LangGraph creates any tasks. So both the LLM node task and Tool node task inherit the same `span_id` value (the agent's span_id).
 
 ### 2.2 SpanContext
 
@@ -137,12 +137,13 @@ A mutable container created fresh for each open span:
 ```python
 @dataclass
 class SpanContext:
-    span_id:        str                    # 8-char hex UUID
+    span_id:        str                    # 32-char hex UUID
     name:           str                    # "run", "agent", "llm_call", "tool_call"
     parent_span_id: str | None             # Links to parent
     trace_id:       str | None             # Session identifier
     tags:           dict[str, Any]         # Inherited tags at span open time
-    attrs:          dict[str, Any]         # Mutable, accumulated via .set()
+    attrs:          dict[str, Any]         # Mutable, accumulated via .set_attr()
+    # Internal — not part of the constructor (init=False):
     _start:         float                  # Monotonic timer at creation
     _failed:        bool                   # Business-level failure flag
     _fail_reason:   str                    # Reason string for business failure
@@ -152,10 +153,10 @@ class SpanContext:
 
 | Method | Purpose |
 |---|---|
-| `set(key, value)` | Accumulate end-time data. All `.set()` calls are flushed into `attrs` on `span.end`. |
+| `set_attr(key, value)` | Accumulate end-time data. All `.set_attr()` calls are flushed into `attrs` on `span.end`. |
 | `fail(reason)` | Mark as business-level failure. Emits `span.end status:error` (not `span.error`). |
 
-**Ownership:** One `SpanContext` per span, owned by exactly one thread/task. Never pass it to another task and call `.set()` concurrently — `attrs` dict is not protected by a lock.
+**Ownership:** One `SpanContext` per span, owned by exactly one thread/task. Never pass it to another task and call `.set_attr()` concurrently — `attrs` dict is not protected by a lock.
 
 ### 2.3 Tracer Class
 
@@ -184,13 +185,13 @@ null → run → agent → llm_call → tool_call → agent (sub-agent)
 ```
 
 ```python
-VALID_CHILDREN: dict[str | None, set[str]] = {
-    None:        {"run"},
-    "run":       {"agent"},
-    "agent":     {"llm_call"},
-    "llm_call":  {"tool_call"},
-    "tool_call": {"agent"},   # sub-agent nested inside a tool
-}
+VALID_CHILDREN: Mapping[str | None, frozenset[str]] = MappingProxyType({
+    None:        frozenset({"run"}),
+    "run":       frozenset({"agent"}),
+    "agent":     frozenset({"llm_call"}),
+    "llm_call":  frozenset({"tool_call"}),
+    "tool_call": frozenset({"agent"}),   # sub-agent nested inside a tool
+})
 ```
 
 On violation: logs `WARNING`, never raises. The span is still emitted with its actual `parent_span_id`.
@@ -232,7 +233,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
 
 | Hook | Action |
 |---|---|
-| `on_chat_model_start` | Opens `llm_call` span via `tracer.open_span()`. Captures model, seq, delta messages, message count. Reads `_agent_name.get()` for the agent label. |
+| `on_chat_model_start` | Opens `llm_call` span via `tracer.open_span()`. Captures model, seq, delta messages, message count. Reads `agent_name.get()` for the agent label. |
 | `on_llm_end` | Closes `llm_call` span via `tracer.close_span()`. Captures tokens, stop_reason, response. Stores `_last_llm_spans[parent_span_id] = span_id`. |
 | `on_llm_error` | Errors `llm_call` span via `tracer.error_span()`. |
 
@@ -249,9 +250,11 @@ from gtracer import tracing_handler
 # Pass via config={"callbacks": [tracing_handler]}
 ```
 
+**`tracing_handler.reset()`:** Clears all internal dicts (`_open_spans`, `_msg_counts`, `_seq_counter`, `_last_llm_spans`). Call between test runs or long-running batch jobs. Not needed for normal service usage.
+
 ### 2.6 Logger Integration
 
-gtracer emits spans via a custom TRACE log level (25) using Python's standard `logging` module. The module-level singleton writes to the `"gtracer"` logger:
+gtracer emits spans via a custom TRACE log level (5, below DEBUG) using Python's standard `logging` module. The module-level singleton writes to the `"gtracer"` logger:
 
 ```python
 tracer = Tracer(logging.getLogger("gtracer"))
@@ -259,12 +262,12 @@ tracer = Tracer(logging.getLogger("gtracer"))
 
 **Enabling span output:**
 
-Spans are only emitted when the `"gtracer"` logger (or its parent) is configured at level 25 or below. Two approaches:
+Spans are only emitted when the `"gtracer"` logger (or its parent) is configured at level 5 or below. Two approaches:
 
 ```python
 # Option A — set the level directly
 import logging
-logging.getLogger("gtracer").setLevel(25)
+logging.getLogger("gtracer").setLevel(5)
 
 # Option B — if you have a custom TRACE level in your app
 logging.getLogger("gtracer").setLevel(logging.getLevelName("TRACE"))
@@ -298,9 +301,9 @@ span() called
   │   ├── Validates hierarchy (VALID_CHILDREN)
   │   ├── Emits span.start
   │   └── Returns SpanContext
-  ├── Updates ContextVars (_span_id, _span_name, _tags, _agent_name)
+  ├── Updates ContextVars (span_id, span_name, tags, agent_name)
   ├── Yields SpanContext to caller
-  │   └── Caller calls span.set() / span.fail() during execution
+  │   └── Caller calls span.set_attr() / span.fail() during execution
   ├── On clean exit:
   │   └── _emit_end() → span.end with duration + status + flushed attrs
   ├── On exception:
@@ -333,13 +336,17 @@ In `_make_span()`:
 
 ```python
 if parent_span_id is not None:
-    # Explicit causal override
+    # Explicit causal override — caller is bridging across task boundaries.
+    # Hierarchy validation is skipped: the parent's span type is unknown.
     resolved_parent_id   = parent_span_id
-    resolved_parent_name = "llm_call"   # assumed logical parent
 else:
     # ContextVar-based
-    resolved_parent_id   = _span_id.get()
-    resolved_parent_name = _span_name.get()
+    resolved_parent_id   = span_id.get()
+    resolved_parent_name = span_name.get()
+    # Validate only when resolving from context (not on explicit override)
+    allowed = VALID_CHILDREN.get(resolved_parent_name, set())
+    if name not in allowed:
+        logger.warning(...)
 ```
 
 **When to use explicit `parent_span_id`:**
@@ -360,28 +367,28 @@ else:
 ```
 ┌──────────────────────────────────────────────────────┐
 │  tracer.span("agent")                                │
-│  Sets: _span_id = "agent_s2"                         │
+│  Sets: span_id = "agent_s2"                          │
 │  Both child tasks inherit this via copy_context()    │
 │                                                      │
 │  ┌─────────────────────┐  ┌────────────────────────┐ │
 │  │ Task 1 (LLM node)   │  │ Task 2 (Tool node)     │ │
-│  │                     │  │                         │ │
-│  │ on_llm_end:         │  │ @tool function:         │ │
-│  │   _last_llm_spans   │  │   agent_id =            │ │
-│  │     ["agent_s2"]    │──│     _span_id.get()      │ │
-│  │     = "llm_s3"      │  │     → "agent_s2"        │ │
-│  │                     │  │   llm_parent =           │ │
-│  │   (dict mutation is │  │     handler              │ │
-│  │    visible to all)  │  │       .last_llm_span(    │ │
-│  │                     │  │         "agent_s2")      │ │
-│  │                     │  │     → "llm_s3"           │ │
+│  │                     │  │                        │ │
+│  │ on_llm_end:         │  │ @tool function:        │ │
+│  │   _last_llm_spans   │  │   agent_id =           │ │
+│  │     ["agent_s2"]    │──│     span_id.get()      │ │
+│  │     = "llm_s3"      │  │     → "agent_s2"       │ │
+│  │                     │  │   llm_parent =         │ │
+│  │   (dict mutation is │  │     handler            │ │
+│  │    visible to all)  │  │       .last_llm_span(  │ │
+│  │                     │  │         "agent_s2")    │ │
+│  │                     │  │     → "llm_s3"         │ │
 │  └─────────────────────┘  └────────────────────────┘ │
 └──────────────────────────────────────────────────────┘
 ```
 
 **Why this works:**
-1. `_span_id` is set by `tracer.span("agent")` **before** LangGraph spawns any tasks
-2. Both tasks inherit the same `_span_id` value via `copy_context()`
+1. `span_id` is set by `tracer.span("agent")` **before** LangGraph spawns any tasks
+2. Both tasks inherit the same `span_id` value via `copy_context()`
 3. `_last_llm_spans` is a regular dict on the handler **instance** — shared object state, not a ContextVar
 4. Task 1 writes to it; Task 2 reads from it — both reference the same object
 5. The `_lock` ensures thread-safe reads/writes
@@ -427,7 +434,7 @@ Every trace line is a single JSON object. Fields are split into two tiers:
 | `event` | enum | `span.start`, `span.end`, `span.error` |
 | `span_name` | enum | `run`, `agent`, `llm_call`, `tool_call` |
 | `trace_id` | string | One per session |
-| `span_id` | string | Unique per span (8-char hex) |
+| `span_id` | string | Unique per span (32-char hex) |
 | `parent_span_id` | string \| null | Links child to parent. Null on root span. |
 
 ### Conditional fields (on span.end / span.error)
@@ -509,23 +516,53 @@ Open dict. Content varies by span type.
 
 ## 5. API Reference
 
-### `configure(truncation_limit=50_000)`
+### `configure(truncation_limit=50_000, enabled=None, log_to_file=None)`
 
 Configure global tracer settings. Call once at application startup.
+
+- **truncation_limit** — max chars for `delta`, `response`, `result` fields (default 50,000).
+- **enabled** — override `GTRACER_ENABLED` env var. `None` = leave unchanged.
+- **log_to_file** — override `GTRACER_LOG_TO_FILE` env var. `None` = leave unchanged.
 
 ```python
 from gtracer import configure
 
 configure(truncation_limit=100_000)
+configure(enabled=False, log_to_file=True)  # silence console, write to file
 ```
 
 ### `tracer.start_trace(trace_id: str)`
 
-Sets `_trace_id` ContextVar. Call **once per invocation** in the thread/task entrypoint, before any spans.
+Sets `trace_id` ContextVar. Call **once per invocation** in the thread/task entrypoint, before any spans.
 
 ```python
 tracer.start_trace(session_id)
 ```
+
+### `@tracer.tool(name=None)` — decorator
+
+Instruments a function as a traced ``tool_call`` span. Automatically resolves the parent ``llm_call``, captures input arguments, and records the return value. Works with both sync and async functions.
+
+```python
+@tool
+@tracer.tool()
+async def search(query: str) -> str:
+    return await execute(query)
+
+# With custom name:
+@tool
+@tracer.tool("custom_search")
+async def search(query: str) -> str:
+    return await execute(query)
+```
+
+### `tracer.current_span_id()` → `str | None`
+
+Return the current active span ID from the ContextVar.
+
+### `tracer.current_trace_id()` → `str | None`
+
+Return the current trace/session ID from the ContextVar.
 
 ### `tracer.span(name, attrs, tags, parent_span_id)` — context manager
 
@@ -534,17 +571,17 @@ The primary API. Updates ContextVars, so nested spans resolve their parent autom
 ```python
 with tracer.span("agent", attrs={"agent": "main"}) as span:
     result = await agent.ainvoke(...)
-    span.set("output_type", type(result).__name__)
+    span.set_attr("output_type", type(result).__name__)
 ```
 
 | Parameter | Type | Description |
 |---|---|---|
 | `name` | `str` | One of: `run`, `agent`, `llm_call`, `tool_call` |
-| `attrs` | `dict \| None` | Start-time data. Also accumulates end-time data via `span.set()`. |
+| `attrs` | `dict \| None` | Start-time data. Also accumulates end-time data via `span.set_attr()`. |
 | `tags` | `dict \| None` | Promoted to top-level JSON. Inherited by children. |
-| `parent_span_id` | `str \| None` | Explicit parent override (bypasses ContextVar). |
+| `parent_span_id` | `str \| None` | Explicit parent override (bypasses ContextVar and skips hierarchy validation). |
 
-### `SpanContext.set(key, value)`
+### `SpanContext.set_attr(key, value)`
 
 Accumulate end-time data onto the span. Flushed on `span.end`.
 
@@ -564,9 +601,13 @@ Closes a span opened with `open_span()`.
 
 Errors a span opened with `open_span()`.
 
-### `serialise_lc_messages(messages) → list[dict]`
+### `tracing_handler.reset()`
 
-Converts LangChain `BaseMessage` instances to JSON-serialisable dicts. Truncates content.
+Clears all internal state accumulated across traces. Call between test runs or batch jobs to free memory. Not needed in typical service usage.
+
+### `serialize_lc_messages(messages) → list[dict]`
+
+Converts LangChain `BaseMessage` instances to JSON-serializable dicts. Truncates content.
 
 ---
 
@@ -583,7 +624,7 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 
-from gtracer import tracer, tracing_handler, _span_id
+from gtracer import tracer, tracing_handler, span_id
 
 
 # ── Define tools with tracing ───────────────────────────────
@@ -591,24 +632,24 @@ from gtracer import tracer, tracing_handler, _span_id
 @tool
 async def search_database(query: str) -> str:
     """Search the database with a SQL query."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "search_database", "input": {"query": query}},
                      parent_span_id=llm_parent) as span:
         result = await execute_query(query)
-        span.set("result", result)
+        span.set_attr("result", result)
         return result
 
 
 @tool
 async def calculator(expression: str) -> str:
     """Evaluate a math expression."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "calculator", "input": {"expression": expression}},
                      parent_span_id=llm_parent) as span:
         result = str(eval(expression))
-        span.set("result", result)
+        span.set_attr("result", result)
         return result
 
 
@@ -646,7 +687,7 @@ async def run_analysis(session_id: str, user_query: str):
                 agent_span.fail("no_structured_response")
                 return None
 
-            agent_span.set("output_type", type(structured).__name__)
+            agent_span.set_attr("output_type", type(structured).__name__)
             return structured
 ```
 
@@ -673,7 +714,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, AIMessage
 from typing import TypedDict
 
-from gtracer import tracer, tracing_handler, _span_id
+from gtracer import tracer, tracing_handler, span_id
 
 
 class GraphState(TypedDict):
@@ -683,12 +724,12 @@ class GraphState(TypedDict):
 
 async def research_node(state: GraphState) -> GraphState:
     """LLM calls inside this node are traced automatically via tracing_handler."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "db_lookup", "input": {"query": "..."}},
                      parent_span_id=llm_parent) as span:
         data = await fetch_from_database(...)
-        span.set("result", data)
+        span.set_attr("result", data)
 
     return {"messages": state["messages"] + [AIMessage(content=data)],
             "iteration": state["iteration"] + 1}
@@ -728,7 +769,7 @@ async def run_graph(session_id: str, question: str):
                 {"messages": [HumanMessage(content=question)], "iteration": 0},
                 config={"callbacks": [tracing_handler]},
             )
-            span.set("iterations", result["iteration"])
+            span.set_attr("iterations", result["iteration"])
             return result
 ```
 
@@ -755,18 +796,18 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 
-from gtracer import tracer, tracing_handler, _span_id
+from gtracer import tracer, tracing_handler, span_id
 
 
 @tool
 async def _inner_tool(query: str) -> str:
     """Tool available to the inner agent only."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "inner_tool", "input": {"query": query}},
                      parent_span_id=llm_parent) as span:
         result = await do_inner_work(query)
-        span.set("result", result)
+        span.set_attr("result", result)
         return result
 
 
@@ -780,25 +821,25 @@ inner_agent = create_agent(
 @tool
 async def smart_search(query: str, intent: str = "") -> str:
     """Search with automatic error recovery via inner agent."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "smart_search", "input": {"query": query}},
                      parent_span_id=llm_parent) as span:
         try:
             result = await execute_search(query)
-            span.set("result", result)
+            span.set_attr("result", result)
             return result
         except SearchError as exc:
             first_error = str(exc)
-            span.set("first_error", first_error)
+            span.set_attr("first_error", first_error)
 
         result = await _run_inner_agent(
             query=query,
             error=first_error,
             tool_span_id=span.span_id,  # explicit parent for sub-agent
         )
-        span.set("result", result)
-        span.set("retried", True)
+        span.set_attr("result", result)
+        span.set_attr("retried", True)
         return result
 
 
@@ -840,7 +881,7 @@ run
 
 **Why `tool_span_id` is critical for parallel execution:**
 
-If two tools run concurrently via `asyncio.gather`, they share ContextVar state. Without explicit `tool_span_id`, sub-agent `tracer.span("agent")` calls clobber each other's `_span_id`.
+If two tools run concurrently via `asyncio.gather`, they share ContextVar state. Without explicit `tool_span_id`, sub-agent `tracer.span("agent")` calls clobber each other's `span_id`.
 
 ---
 
@@ -932,35 +973,50 @@ No special code needed for the standard tool pattern. Only sub-agents spawned in
 
 ### Pattern 6: Adding a new tool
 
-Minimal template:
+**Recommended — decorator:**
 
 ```python
 from langchain_core.tools import tool
-from gtracer import tracer, tracing_handler, _span_id
+from gtracer import tracer
+
+@tool
+@tracer.tool()
+async def my_tool(param: str) -> str:
+    """Tool description for the LLM."""
+    return await do_work(param)
+```
+
+The ``@tracer.tool()`` decorator automatically captures input arguments, records the return value as ``result``, and resolves the parent ``llm_call`` span. Works with both sync and async functions.
+
+**Manual — for full control:**
+
+```python
+from langchain_core.tools import tool
+from gtracer import tracer, tracing_handler, span_id
 
 @tool
 async def my_tool(param: str) -> str:
     """Tool description for the LLM."""
-    llm_parent = tracing_handler.last_llm_span(_span_id.get())
+    llm_parent = tracing_handler.last_llm_span()
     with tracer.span("tool_call",
                      attrs={"tool": "my_tool", "input": {"param": param}},
                      parent_span_id=llm_parent) as span:
         try:
             result = await do_work(param)
-            span.set("result", result)
+            span.set_attr("result", result)
             return result
         except SomeError as exc:
             span.fail(str(exc))
             return f"Error: {exc}"
 ```
 
-**Checklist:**
-- [ ] Import `tracer`, `tracing_handler`, `_span_id` from `gtracer`
-- [ ] Look up `llm_parent` via `tracing_handler.last_llm_span(_span_id.get())`
+**Manual checklist:**
+- [ ] Import `tracer`, `tracing_handler`, `span_id` from `gtracer`
+- [ ] Look up `llm_parent` via `tracing_handler.last_llm_span()`
 - [ ] Open `tool_call` span with `parent_span_id=llm_parent`
 - [ ] Set `attrs.tool` to the tool name
 - [ ] Set `attrs.input` with the tool's arguments
-- [ ] Call `span.set("result", ...)` on success
+- [ ] Call `span.set_attr("result", ...)` on success
 - [ ] Call `span.fail(reason)` for business errors (no exception raised)
 - [ ] Let Python exceptions propagate naturally (the span context manager handles them)
 - [ ] If the tool spawns a sub-agent, pass `tool_span_id=span.span_id`
@@ -1010,15 +1066,15 @@ with tracer.span("llm_call"):
 
 LangGraph replaces `tags=["agent"]` with internal step tags like `["seq:step:1"]`. **Never read callback `tags` to identify the agent.**
 
-The tracer uses `_agent_name` ContextVar instead. Set via `tracer.span("agent", attrs={"agent": "my_agent"})`. The `attrs.agent` key is **load-bearing** — it must match the logical name you want in traces.
+The tracer uses `agent_name` ContextVar instead. Set via `tracer.span("agent", attrs={"agent": "my_agent"})`. The `attrs.agent` key is **load-bearing** — it must match the logical name you want in traces.
 
 ### 6. Hierarchy validation is a warning, not an error
 
 Invalid nesting logs `WARNING` and continues. The span is still emitted. Fix violations when you see them.
 
-### 7. Log level must be TRACE (25)
+### 7. Log level must be TRACE (5)
 
-Spans use `logger.trace()` (level 25). Ensure the `"gtracer"` logger is set to level 25 or below, or span events won't be written.
+Spans use `logger.trace()` (level 5). Ensure the `"gtracer"` logger is set to level 5 or below, or span events won't be written.
 
 ### 8. seq counter is global per session
 
@@ -1036,7 +1092,7 @@ No explicit retry field. Two consecutive `llm_call` spans with the same `seq` un
 
 ### 10. Parallel tools share ContextVar state
 
-`asyncio.gather` runs coroutines in the **same Task**. If two tools run concurrently and both open `tracer.span("agent")`, they clobber each other's `_span_id`. Always pass `tool_span_id` explicitly to sub-agent functions.
+`asyncio.gather` runs coroutines in the **same Task**. If two tools run concurrently and both open `tracer.span("agent")`, they clobber each other's `span_id`. Always pass `tool_span_id` explicitly to sub-agent functions.
 
 ---
 
@@ -1053,12 +1109,15 @@ configure(truncation_limit=50_000)  # default
 | Parameter | Default | Description |
 |---|---|---|
 | `truncation_limit` | `50_000` | Max chars for content fields in span attrs (`delta`, `response`, `result`). Longer strings are truncated with `...[truncated]` appended. |
+| `enabled` | `None` | Enable/disable stdout span output. Overrides `GTRACER_ENABLED`. `None` preserves the current state. |
+| `log_to_file` | `None` | Enable/disable local `.jsonl` file logging. Overrides `GTRACER_LOG_TO_FILE`. `None` preserves the current state. |
+| `extra_children` | `None` | Extend the span taxonomy with custom span types. Additive — never removes existing rules. |
 
 ### Log level
 
 ```python
 import logging
-logging.getLogger("gtracer").setLevel(25)   # enable TRACE output
+logging.getLogger("gtracer").setLevel(5)   # enable TRACE output
 ```
 
 Or via environment variable if your app reads it:
