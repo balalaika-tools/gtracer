@@ -83,6 +83,27 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
 
+class _ImmediateFileHandler(logging.FileHandler):
+    """FileHandler that opens the file line-buffered.
+
+    Each JSON record ends with ``\\n`` (the ``StreamHandler.terminator``),
+    so line buffering ensures every record is flushed to the OS kernel
+    immediately on ``stream.write()`` — before the explicit ``flush()``
+    call in ``StreamHandler.emit()``.  This eliminates the race window
+    where data sits only in Python's internal buffer and would be lost
+    if the process is killed.
+    """
+
+    def _open(self):  # type: ignore[override]
+        return open(
+            self.baseFilename,
+            self.mode,
+            buffering=1,  # line-buffered
+            encoding=self.encoding,
+            errors=self.errors,
+        )
+
+
 _own_handlers: list[logging.Handler] = []
 
 # Track current state so configure() can change one setting without re-reading env for the other.
@@ -126,7 +147,7 @@ def _configure(enabled: bool, log_to_file: bool = False) -> None:
         log_dir = Path.cwd() / "logs"
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / f"gtracer_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jsonl"
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = _ImmediateFileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(_TRACE_LEVEL)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

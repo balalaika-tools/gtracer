@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 — 2026-04-01
+
+### Fixes
+
+- **File logging now survives process termination.** `FileHandler` previously used Python's default full-buffered I/O, so log records could sit in Python's internal buffer and be lost if the process was killed (SIGTERM/SIGKILL) before the buffer filled. The handler is now opened with `buffering=1` (line-buffered), which flushes every JSON record to the OS kernel immediately when the trailing `\n` is written — before the explicit `flush()` in `StreamHandler.emit()` even runs. Kernel-buffered data is preserved across process death; only a power loss could drop it.
+
+---
+
 ## 0.2.1 — 2026-04-01
 
 ### Changes
