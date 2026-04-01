@@ -28,7 +28,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
-from gtracer.tracer import SpanContext, _agent_name, _span_id, _trace_id, serialize_lc_messages, tracer
+from gtracer.tracer import SpanContext, _agent_name, _span_id, _span_name, _trace_id, serialize_lc_messages, tracer
 
 
 class TracingCallbackHandler(BaseCallbackHandler):
@@ -85,7 +85,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
                                  attrs={"tool": "my_tool", "input": {"param": param}},
                                  parent_span_id=llm_parent) as span:
                     result = await do_work(param)
-                    span.set("result", result)
+                    span.set_attr("result", result)
                     return result
         """
         if agent_span_id is None:
@@ -151,18 +151,28 @@ class TracingCallbackHandler(BaseCallbackHandler):
         agent_key = _span_id.get() or ""
         msg_key = (trace_key, agent_key)
 
+        # Delta tracking is only meaningful inside an agent loop where the
+        # same LLM is called repeatedly with accumulating message history.
+        # Direct LLM calls under "run" (preprocessing, classifiers) are
+        # one-shot — always log the full message list to avoid collisions
+        # when concurrent tasks share the same _span_id.
+        inside_agent = _span_name.get() == "agent"
+
         with self._lock:
             if (len(self._open_spans) > self._max_traces
                     or len(self._msg_counts) > self._max_traces):
                 self._evict_oldest()
             self._seq_counter[trace_key] = self._seq_counter.get(trace_key, 0) + 1
             seq        = self._seq_counter[trace_key]
-            prev_count = self._msg_counts.get(msg_key, 0)
-            # If all_msgs is shorter than prev_count, we're in a sub-agent
-            # that has its own fresh message history — reset the delta baseline.
-            if len(all_msgs) < prev_count:
+            if inside_agent:
+                prev_count = self._msg_counts.get(msg_key, 0)
+                # If all_msgs is shorter than prev_count, we're in a sub-agent
+                # that has its own fresh message history — reset the delta baseline.
+                if len(all_msgs) < prev_count:
+                    prev_count = 0
+                self._msg_counts[msg_key] = len(all_msgs)
+            else:
                 prev_count = 0
-            self._msg_counts[msg_key] = len(all_msgs)
 
         delta = serialize_lc_messages(all_msgs[prev_count:])
 

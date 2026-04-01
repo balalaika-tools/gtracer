@@ -30,12 +30,13 @@ Every time an LLM call happens inside your agent, gtracer captures it as a struc
 
 ```
 run
+├── llm_call              ← direct LLM calls (preprocessing, classifiers)
 └── agent "main"
-    ├── llm_call seq:1  ← tokens, model, message delta, latency
+    ├── llm_call seq:1    ← tokens, model, message delta, latency
     │   └── tool_call search_database  ← input, result, duration
     ├── llm_call seq:2
     │   └── tool_call calculator
-    └── llm_call seq:3  ← final answer
+    └── llm_call seq:3    ← final answer
 ```
 
 Works with CloudWatch, Datadog, or any stdout log consumer. Zero configuration — spans are live the moment you import the package.

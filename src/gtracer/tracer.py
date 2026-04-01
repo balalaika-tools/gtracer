@@ -102,7 +102,7 @@ def _trunc_limit() -> int:
 
 _valid_children: dict[str | None, frozenset[str]] = {
     None:        frozenset({"run"}),
-    "run":       frozenset({"agent"}),
+    "run":       frozenset({"agent", "llm_call"}),   # direct LLM calls (preprocessing, classifiers) allowed under run
     "agent":     frozenset({"llm_call"}),
     "llm_call":  frozenset({"tool_call"}),
     "tool_call": frozenset({"agent"}),   # sub-agent nested inside a tool
@@ -144,7 +144,7 @@ class SpanContext:
         parent_span_id: ID of the parent span, or ``None`` on the root span.
         trace_id: Session identifier set by ``tracer.start_trace()``.
         tags: Tags inherited at span open time, promoted to top-level JSON.
-        attrs: Mutable attribute dict.  Accumulate end-time data via ``.set()``.
+        attrs: Mutable attribute dict.  Accumulate end-time data via ``.set_attr()``.
     """
 
     span_id:        str
@@ -239,7 +239,7 @@ def _truncate_content_block(block: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 class Tracer:
-    """Emit structured span events as JSONL via ``logger.trace()``.
+    """Emit structured span events as JSONL via ``logger.log()``.
 
     Import the module-level singleton rather than instantiating this class
     directly::
@@ -306,7 +306,7 @@ class Tracer:
             name: Span type — one of ``"run"``, ``"agent"``, ``"llm_call"``,
                   ``"tool_call"``.  Must satisfy ``VALID_CHILDREN`` nesting rules.
             attrs: Start-time attributes merged into the span payload.  End-time
-                   data is added via ``SpanContext.set()`` during the ``with`` block.
+                   data is added via ``SpanContext.set_attr()`` during the ``with`` block.
             tags: Key/value pairs promoted to top-level JSON fields.  Inherited
                   by all descendant spans.
             parent_span_id: Explicit parent span ID.  Overrides ContextVar-based
@@ -386,7 +386,7 @@ class Tracer:
         Args:
             ctx: The SpanContext returned by ``open_span()``.
             end_attrs: Additional attributes to merge into the span before closing.
-                       Equivalent to calling ``ctx.set(k, v)`` for each key.
+                       Equivalent to calling ``ctx.set_attr(k, v)`` for each key.
         """
         if end_attrs:
             ctx.attrs.update(end_attrs)

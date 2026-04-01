@@ -93,7 +93,7 @@ waterfalls, and cost analytics.
 
 **Key design decisions:**
 
-1. **JSONL via Python logging** — no new infrastructure. Spans are emitted via `logger.trace()` at a custom TRACE level (5, below DEBUG). Any `logging.Handler` captures them automatically.
+1. **JSONL via Python logging** — no new infrastructure. Spans are emitted via `logger.log()` at a custom TRACE level (5, below DEBUG). Any `logging.Handler` captures them automatically.
 
 2. **Two APIs** — `span()` (context manager, updates ContextVars) for code you control, and `open_span()`/`close_span()` for LangChain callbacks where start/end happen in separate methods.
 
@@ -113,7 +113,7 @@ waterfalls, and cost analytics.
 src/gtracer/tracer.py
 ```
 
-Five ContextVars provide async-safe span context propagation:
+Six ContextVars provide async-safe span context propagation:
 
 | ContextVar | Type | Purpose |
 |---|---|---|
@@ -122,6 +122,7 @@ Five ContextVars provide async-safe span context propagation:
 | `trace_id` | `str \| None` | Session identifier. Set once by `start_trace()`, inherited by all descendant spans. |
 | `tags` | `dict` | Inherited tags. Merged down the tree — child spans automatically carry all ancestor tags. |
 | `agent_name` | `str` | Current agent name. Set when opening an `agent` span. Read by the callback handler to label `llm_call` spans. |
+| `trace_metadata` | `dict` | Trace-level metadata set by `start_trace(metadata=...)`. Merged into every span's tag namespace, lower priority than span-level tags. |
 
 **Propagation rules:**
 
@@ -163,11 +164,13 @@ class SpanContext:
 ```python
 class Tracer:
     def __init__(self, logger: logging.Logger)
-    def start_trace(self, trace_id: str) -> None
+    def start_trace(self, trace_id: str, metadata: dict | None = None) -> None
     def span(self, name, attrs, tags, parent_span_id) -> Generator[SpanContext]
     def open_span(self, name, attrs, tags, parent_span_id) -> SpanContext
     def close_span(self, ctx, end_attrs) -> None
     def error_span(self, ctx, exc) -> None
+    def current_span_id(self) -> str | None
+    def current_trace_id(self) -> str | None
 ```
 
 Module-level singleton:
@@ -182,12 +185,13 @@ Four span types with strict hierarchy enforcement:
 
 ```
 null → run → agent → llm_call → tool_call → agent (sub-agent)
+              └───→ llm_call  (direct LLM calls: preprocessing, classifiers)
 ```
 
 ```python
 VALID_CHILDREN: Mapping[str | None, frozenset[str]] = MappingProxyType({
     None:        frozenset({"run"}),
-    "run":       frozenset({"agent"}),
+    "run":       frozenset({"agent", "llm_call"}),  # direct LLM calls allowed under run
     "agent":     frozenset({"llm_call"}),
     "llm_call":  frozenset({"tool_call"}),
     "tool_call": frozenset({"agent"}),   # sub-agent nested inside a tool
@@ -200,16 +204,17 @@ On violation: logs `WARNING`, never raises. The span is still emitted with its a
 
 ```
 run (s1)
-└── agent "main" (s2, parent=s1)
-    ├── llm_call seq:1 (s3, parent=s2)  ← decides to call a tool
-    │   └── tool_call (s4, parent=s3)   ← triggered by llm_call seq:1
-    │       └── agent "fixer" (s5, parent=s4)  ← sub-agent inside tool
-    │           ├── llm_call seq:1 (s6, parent=s5)
-    │           │   └── tool_call (s7, parent=s6)
-    │           └── llm_call seq:2 (s8, parent=s5)
-    ├── llm_call seq:2 (s9, parent=s2)  ← processes tool result
-    │   └── tool_call (s10, parent=s9)
-    └── llm_call seq:3 (s11, parent=s2) ← final answer
+├── llm_call (s2, parent=s1)            ← direct LLM call (e.g. preprocessing)
+└── agent "main" (s3, parent=s1)
+    ├── llm_call seq:1 (s4, parent=s3)  ← decides to call a tool
+    │   └── tool_call (s5, parent=s4)   ← triggered by llm_call seq:1
+    │       └── agent "fixer" (s6, parent=s5)  ← sub-agent inside tool
+    │           ├── llm_call seq:1 (s7, parent=s6)
+    │           │   └── tool_call (s8, parent=s7)
+    │           └── llm_call seq:2 (s9, parent=s6)
+    ├── llm_call seq:2 (s10, parent=s3)  ← processes tool result
+    │   └── tool_call (s11, parent=s10)
+    └── llm_call seq:3 (s12, parent=s3) ← final answer
 ```
 
 ### 2.5 Callback Handler
@@ -222,11 +227,11 @@ Bridges LangChain's callback system to the tracer. Instruments every LLM call au
 
 ```python
 class TracingCallbackHandler(BaseCallbackHandler):
-    _open_spans:     dict[str, SpanContext]  # run_id → open span
-    _msg_counts:     dict[str, int]          # trace_key → prev msg count
-    _seq_counter:    dict[str, int]          # trace_key → seq number
-    _last_llm_spans: dict[str, str]          # agent_span_id → llm_span_id
-    _lock:           threading.Lock          # protects all dicts
+    _open_spans:     dict[str, SpanContext]         # run_id → open span
+    _msg_counts:     dict[tuple[str, str], int]     # (trace_key, agent_key) → prev msg count
+    _seq_counter:    dict[str, int]                 # trace_key → seq number
+    _last_llm_spans: dict[str, str]                 # agent_span_id → llm_span_id
+    _lock:           threading.Lock                 # protects all dicts
 ```
 
 **Lifecycle hooks:**
@@ -237,7 +242,7 @@ class TracingCallbackHandler(BaseCallbackHandler):
 | `on_llm_end` | Closes `llm_call` span via `tracer.close_span()`. Captures tokens, stop_reason, response. Stores `_last_llm_spans[parent_span_id] = span_id`. |
 | `on_llm_error` | Errors `llm_call` span via `tracer.error_span()`. |
 
-**Delta tracking:** Each `on_chat_model_start` receives the full accumulated message history. The handler tracks how many messages were seen on the previous call (keyed by `trace_id`) and logs only the new messages as `delta`.
+**Delta tracking:** Each `on_chat_model_start` receives the full accumulated message history. Delta tracking only activates inside `agent` spans, where the same LLM is called repeatedly with accumulating history. The handler tracks how many messages were seen on the previous call (keyed by `(trace_id, agent_span_id)`) and logs only the new messages as `delta`. Each agent tracks its own baseline independently, preventing concurrent or nested sub-agents from corrupting each other's deltas. Direct LLM calls outside an agent span (e.g. preprocessing steps under `run`) always log the full message list — delta tracking is skipped to avoid collisions when concurrent tasks share the same `_span_id`.
 
 **Sub-agent reset:** If a sub-agent starts with a shorter message history than the current `prev_count` (because it has a fresh conversation), the baseline resets to 0 so all of the sub-agent's initial messages are captured correctly.
 
@@ -273,7 +278,7 @@ logging.getLogger("gtracer").setLevel(5)
 logging.getLogger("gtracer").setLevel(logging.getLevelName("TRACE"))
 ```
 
-**JSON output:** The tracer emits via `logger.trace(msg, extra=payload)`. Python's logging flattens `extra={}` fields onto the `LogRecord`. No third-party formatter required — if your app already has a JSON formatter on the root logger, spans are serialised by it automatically.
+**JSON output:** The tracer emits via `logger.log(_TRACE_LEVEL, msg, extra=payload)`. Python's logging flattens `extra={}` fields onto the `LogRecord`. No third-party formatter required — if your app already has a JSON formatter on the root logger, spans are serialised by it automatically.
 
 **CloudWatch / stdout:** Ensure the `"gtracer"` logger propagates to the root handler (the default), or attach your own handler directly to `logging.getLogger("gtracer")`.
 
@@ -281,7 +286,7 @@ logging.getLogger("gtracer").setLevel(logging.getLevelName("TRACE"))
 
 ```
 tracer._emit(event, ctx, ...)
-  └── self._log.trace(msg, extra=payload)
+  └── self._log.log(_TRACE_LEVEL, msg, extra=payload)
        └── Python logging flattens extra{} onto LogRecord
             └── Your JSON formatter → one JSONL line to stdout / CloudWatch
 ```
@@ -354,7 +359,7 @@ else:
 - Sub-agent spans — to parent `agent` under `tool_call` in parallel tool scenarios
 
 **When ContextVar-based resolution works:**
-- `run` → `agent` nesting (same task)
+- `run` → `agent` or `run` → `llm_call` nesting (same task)
 - `agent` span opening (before any tasks are created)
 - Any spans within the same `asyncio.Task`
 
@@ -516,13 +521,14 @@ Open dict. Content varies by span type.
 
 ## 5. API Reference
 
-### `configure(truncation_limit=50_000, enabled=None, log_to_file=None)`
+### `configure(truncation_limit=50_000, enabled=None, log_to_file=None, extra_children=None)`
 
 Configure global tracer settings. Call once at application startup.
 
 - **truncation_limit** — max chars for `delta`, `response`, `result` fields (default 50,000).
 - **enabled** — override `GTRACER_ENABLED` env var. `None` = leave unchanged.
 - **log_to_file** — override `GTRACER_LOG_TO_FILE` env var. `None` = leave unchanged.
+- **extra_children** — extend the span taxonomy with custom span types. Additive — never removes existing rules. Example: `{"agent": {"retrieval"}, "retrieval": {"llm_call"}}`.
 
 ```python
 from gtracer import configure
@@ -531,12 +537,13 @@ configure(truncation_limit=100_000)
 configure(enabled=False, log_to_file=True)  # silence console, write to file
 ```
 
-### `tracer.start_trace(trace_id: str)`
+### `tracer.start_trace(trace_id: str, metadata: dict | None = None)`
 
-Sets `trace_id` ContextVar. Call **once per invocation** in the thread/task entrypoint, before any spans.
+Sets `trace_id` ContextVar and optional trace-level metadata. Call **once per invocation** in the thread/task entrypoint, before any spans. Metadata is merged into every span's top-level JSON fields (lower priority than span-level tags).
 
 ```python
 tracer.start_trace(session_id)
+tracer.start_trace(session_id, metadata={"user_id": "u42", "env": "prod"})
 ```
 
 ### `@tracer.tool(name=None)` — decorator
@@ -1074,7 +1081,7 @@ Invalid nesting logs `WARNING` and continues. The span is still emitted. Fix vio
 
 ### 7. Log level must be TRACE (5)
 
-Spans use `logger.trace()` (level 5). Ensure the `"gtracer"` logger is set to level 5 or below, or span events won't be written.
+Spans are emitted at level 5 (`_TRACE_LEVEL`). Ensure the `"gtracer"` logger is set to level 5 or below, or span events won't be written.
 
 ### 8. seq counter is global per session
 

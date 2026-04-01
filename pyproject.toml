@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gtracer"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lightweight span-based tracing for LangChain/LangGraph agents"
 readme = "README.md"
 requires-python = ">=3.10"
